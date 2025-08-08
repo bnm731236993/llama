@@ -18,16 +18,24 @@ from torch import nn
 
 @dataclass
 class ModelArgs:
+    """ 模型参数类 """
+    # 维度
     dim: int = 4096
+    # 层数
     n_layers: int = 32
+    # 注意力头数
     n_heads: int = 32
     n_kv_heads: Optional[int] = None
+    # 词典大小
     vocab_size: int = -1  # defined later by tokenizer
     multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
     ffn_dim_multiplier: Optional[float] = None
+    # 标准化层的eps
     norm_eps: float = 1e-5
 
+    # 最大批大小
     max_batch_size: int = 32
+    # 最大序列长度
     max_seq_len: int = 2048
 
 
@@ -174,7 +182,8 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
 
 
 class Attention(nn.Module):
-    """Multi-head attention module."""
+    """Multi-head attention module.
+    多头注意力模块"""
     def __init__(self, args: ModelArgs):
         """
         Initialize the Attention module.
@@ -334,6 +343,7 @@ class FeedForward(nn.Module):
             hidden_dim = int(ffn_dim_multiplier * hidden_dim)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
+        # 并行线性层
         self.w1 = ColumnParallelLinear(
             dim, hidden_dim, bias=False, gather_output=False, init_method=lambda x: x
         )
