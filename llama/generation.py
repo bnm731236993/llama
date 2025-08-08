@@ -19,11 +19,14 @@ from fairscale.nn.model_parallel.initialize import (
 from llama.model import ModelArgs, Transformer
 from llama.tokenizer import Tokenizer
 
+# 三种对话角色
 Role = Literal["system", "user", "assistant"]
 
 
 class Message(TypedDict):
+    # 角色
     role: Role
+    # 内容
     content: str
 
 
@@ -98,24 +101,32 @@ class Llama:
             sys.stdout = open(os.devnull, "w")
 
         start_time = time.time()
+        # 查看目录下是否有检查点
         checkpoints = sorted(Path(ckpt_dir).glob("*.pth"))
         assert len(checkpoints) > 0, f"no checkpoint files found in {ckpt_dir}"
         assert model_parallel_size == len(
             checkpoints
         ), f"Loading a checkpoint for MP={len(checkpoints)} but world size is {model_parallel_size}"
         ckpt_path = checkpoints[get_model_parallel_rank()]
+        # 加载检查点权重
         checkpoint = torch.load(ckpt_path, map_location="cpu")
-        with open(Path(ckpt_dir) / "params.json", "r") as f:
-            params = json.loads(f.read())
 
+        with open(Path(ckpt_dir) / "params.json", "r") as f:
+            # 读取为数
+            params = json.loads(f.read())
+        # 模型参数
         model_args: ModelArgs = ModelArgs(
             max_seq_len=max_seq_len,
             max_batch_size=max_batch_size,
             **params,
         )
+
+        # 分词器
         tokenizer = Tokenizer(model_path=tokenizer_path)
         model_args.vocab_size = tokenizer.n_words
         torch.set_default_tensor_type(torch.cuda.HalfTensor)
+
+        # 初始化模型
         model = Transformer(model_args)
         model.load_state_dict(checkpoint, strict=False)
         print(f"Loaded in {time.time() - start_time:.2f} seconds")
@@ -129,8 +140,11 @@ class Llama:
     @torch.inference_mode()
     def generate(
         self,
+        # Token化的提示词，多组
         prompt_tokens: List[List[int]],
+        # 最大长度
         max_gen_len: int,
+        # 温度
         temperature: float = 0.6,
         top_p: float = 0.9,
         logprobs: bool = False,
@@ -159,33 +173,57 @@ class Llama:
         bsz = len(prompt_tokens)
         assert bsz <= params.max_batch_size, (bsz, params.max_batch_size)
 
+        # 最短/长的提示词长度
         min_prompt_len = min(len(t) for t in prompt_tokens)
         max_prompt_len = max(len(t) for t in prompt_tokens)
+        # 不能超过设定的上限
         assert max_prompt_len <= params.max_seq_len
+
+        # 提示词+输出的长度不应该超过设定的最大上限
         total_len = min(params.max_seq_len, max_gen_len + max_prompt_len)
 
         pad_id = self.tokenizer.pad_id
-        tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device="cuda")
+        # (N, L)，用PAD填充
+        tokens = torch.full((bsz, total_len), pad_id,
+                            dtype=torch.long, device="cuda")
+        # 遍历输入，转化为张量的列表
         for k, t in enumerate(prompt_tokens):
-            tokens[k, : len(t)] = torch.tensor(t, dtype=torch.long, device="cuda")
+            tokens[k, : len(t)] = torch.tensor(
+                t, dtype=torch.long, device="cuda")
         if logprobs:
+            # (N, L)大小的空矩阵，用于存放输出概率分布
             token_logprobs = torch.zeros_like(tokens, dtype=torch.float)
 
         prev_pos = 0
+        # (N)
         eos_reached = torch.tensor([False] * bsz, device="cuda")
+        # 所有不为空的遮挡
         input_text_mask = tokens != pad_id
+
+        # 如果提示词太长导致输出长度为0
         if min_prompt_len == total_len:
+            # 前向计算，输出概率分布
+            # (N, L, V)
             logits = self.model.forward(tokens, prev_pos)
+            # 交叉熵损失
             token_logprobs = -F.cross_entropy(
+                # (N, V, L)
                 input=logits.transpose(1, 2),
+                # (N, L)
                 target=tokens,
                 reduction="none",
                 ignore_index=pad_id,
             )
 
         for cur_pos in range(min_prompt_len, total_len):
+            # 前向计算
+            # 传入(N, P_pre:P_cur)，输出(N, P_pre:P_cur, V)
             logits = self.model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
             if temperature > 0:
+                # 温度用于配合SoftMAX来调整Token的概率分布
+                # 温度越高，概率的最大/小值的差距越小，也就是随机性增强
+                # 只取最后一个Token
+                # (N, V)
                 probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
                 next_token = sample_top_p(probs, top_p)
             else:
@@ -198,9 +236,9 @@ class Llama:
             )
             tokens[:, cur_pos] = next_token
             if logprobs:
-                token_logprobs[:, prev_pos + 1 : cur_pos + 1] = -F.cross_entropy(
+                token_logprobs[:, prev_pos + 1: cur_pos + 1] = -F.cross_entropy(
                     input=logits.transpose(1, 2),
-                    target=tokens[:, prev_pos + 1 : cur_pos + 1],
+                    target=tokens[:, prev_pos + 1: cur_pos + 1],
                     reduction="none",
                     ignore_index=pad_id,
                 )
@@ -217,10 +255,11 @@ class Llama:
         for i, toks in enumerate(tokens.tolist()):
             # cut to max gen len
             start = 0 if echo else len(prompt_tokens[i])
-            toks = toks[start : len(prompt_tokens[i]) + max_gen_len]
+            toks = toks[start: len(prompt_tokens[i]) + max_gen_len]
             probs = None
             if logprobs:
-                probs = token_logprobs[i][start : len(prompt_tokens[i]) + max_gen_len]
+                probs = token_logprobs[i][start: len(
+                    prompt_tokens[i]) + max_gen_len]
             # cut to eos tok if any
             if self.tokenizer.eos_id in toks:
                 eos_idx = toks.index(self.tokenizer.eos_id)
@@ -261,7 +300,8 @@ class Llama:
         """
         if max_gen_len is None:
             max_gen_len = self.model.params.max_seq_len - 1
-        prompt_tokens = [self.tokenizer.encode(x, bos=True, eos=False) for x in prompts]
+        prompt_tokens = [self.tokenizer.encode(
+            x, bos=True, eos=False) for x in prompts]
         generation_tokens, generation_logprobs = self.generate(
             prompt_tokens=prompt_tokens,
             max_gen_len=max_gen_len,
@@ -319,7 +359,8 @@ class Llama:
         unsafe_requests = []
         for dialog in dialogs:
             unsafe_requests.append(
-                any([tag in msg["content"] for tag in SPECIAL_TAGS for msg in dialog])
+                any([tag in msg["content"]
+                    for tag in SPECIAL_TAGS for msg in dialog])
             )
             if dialog[0]["role"] == "system":
                 dialog = [

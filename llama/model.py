@@ -572,9 +572,11 @@ class Transformer(nn.Module):
 
         # 通过各个Transformer层
         for layer in self.layers:
+            # (N, L, D)
             h = layer(h, start_pos, freqs_cis, mask)
         # 标准化
         h = self.norm(h)
-        # 最后的线性映射
+        # 最后的线性映射，输出每一个Token的概率分布
+        # (N, L, V)
         output = self.output(h).float()
         return output
