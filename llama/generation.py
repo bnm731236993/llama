@@ -452,10 +452,14 @@ def sample_top_p(probs, p):
         exceeds the threshold p. The distribution is renormalized based on the selected tokens.
 
     """
+    # 从大到小排序，同时返回索引
+    # (N, V), (N, Idx)
     probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
+    # 累加
     probs_sum = torch.cumsum(probs_sort, dim=-1)
     mask = probs_sum - probs_sort > p
     probs_sort[mask] = 0.0
+    # 除以累加和
     probs_sort.div_(probs_sort.sum(dim=-1, keepdim=True))
     next_token = torch.multinomial(probs_sort, num_samples=1)
     next_token = torch.gather(probs_idx, -1, next_token)
