@@ -365,6 +365,7 @@ class FeedForward(nn.Module):
     ):
         """
         Initialize the FeedForward module.
+        前向层
 
         Args:
             dim (int): Input dimension.
@@ -379,6 +380,7 @@ class FeedForward(nn.Module):
 
         """
         super().__init__()
+        # 隐藏层维度
         hidden_dim = int(2 * hidden_dim / 3)
         # custom dim factor multiplier
         if ffn_dim_multiplier is not None:
@@ -386,7 +388,7 @@ class FeedForward(nn.Module):
         hidden_dim = multiple_of * \
             ((hidden_dim + multiple_of - 1) // multiple_of)
 
-        # 并行线性层
+        # 线性层
         self.w1 = ColumnParallelLinear(
             dim, hidden_dim, bias=False, gather_output=False, init_method=lambda x: x
         )
@@ -398,6 +400,8 @@ class FeedForward(nn.Module):
         )
 
     def forward(self, x):
+        # 连续的三个线性层
+        # (N, L, D)->(N, L, D_Hid)->(N, L, D)
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
 
