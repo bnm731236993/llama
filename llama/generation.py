@@ -194,6 +194,7 @@ class Llama:
             # (N, L)大小的空矩阵，用于存放输出概率分布
             token_logprobs = torch.zeros_like(tokens, dtype=torch.float)
 
+        # 记录上一次的位置
         prev_pos = 0
         # (N)
         eos_reached = torch.tensor([False] * bsz, device="cuda")
@@ -225,17 +226,23 @@ class Llama:
                 # 只取最后一个Token
                 # (N, V)
                 probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
+                # Top-P采样获取最后一个Token
+                # (N, 1)
                 next_token = sample_top_p(probs, top_p)
             else:
                 next_token = torch.argmax(logits[:, -1], dim=-1)
 
+            # (N)
             next_token = next_token.reshape(-1)
             # only replace token if prompt has already been generated
             next_token = torch.where(
                 input_text_mask[:, cur_pos], tokens[:, cur_pos], next_token
             )
+            # 当前位置替换为本次生成的Token
             tokens[:, cur_pos] = next_token
+
             if logprobs:
+                # 重新计算交叉熵损失
                 token_logprobs[:, prev_pos + 1: cur_pos + 1] = -F.cross_entropy(
                     input=logits.transpose(1, 2),
                     target=tokens[:, prev_pos + 1: cur_pos + 1],
@@ -250,21 +257,33 @@ class Llama:
                 break
 
         if logprobs:
+            # 列表化
             token_logprobs = token_logprobs.tolist()
+
+        # 输出Token和概率
         out_tokens, out_logprobs = [], []
+        # 遍历每组输入
         for i, toks in enumerate(tokens.tolist()):
             # cut to max gen len
+            # 从提示词的长度开始，也就是从真输出开始
             start = 0 if echo else len(prompt_tokens[i])
+            # 截取输出Token
             toks = toks[start: len(prompt_tokens[i]) + max_gen_len]
+
             probs = None
             if logprobs:
+                # 截取相应的概率
                 probs = token_logprobs[i][start: len(
                     prompt_tokens[i]) + max_gen_len]
+
             # cut to eos tok if any
             if self.tokenizer.eos_id in toks:
+                # 找出EOS的索引
                 eos_idx = toks.index(self.tokenizer.eos_id)
+                # 截取到EOS
                 toks = toks[:eos_idx]
                 probs = probs[:eos_idx] if logprobs else None
+
             out_tokens.append(toks)
             out_logprobs.append(probs)
         return (out_tokens, out_logprobs if logprobs else None)
