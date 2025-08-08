@@ -365,7 +365,7 @@ class FeedForward(nn.Module):
     ):
         """
         Initialize the FeedForward module.
-        前向层
+        双线性层
 
         Args:
             dim (int): Input dimension.
@@ -409,6 +409,7 @@ class TransformerBlock(nn.Module):
     def __init__(self, layer_id: int, args: ModelArgs):
         """
         Initialize a TransformerBlock.
+        单个Transformer块
 
         Args:
             layer_id (int): Identifier for the layer.
@@ -426,18 +427,26 @@ class TransformerBlock(nn.Module):
 
         """
         super().__init__()
+        # 注意力头数
         self.n_heads = args.n_heads
         self.dim = args.dim
         self.head_dim = args.dim // args.n_heads
+
+        # 注意力层
         self.attention = Attention(args)
+        # 双线性层
         self.feed_forward = FeedForward(
             dim=args.dim,
+            # 隐藏层维度为注意力层维度的4倍
             hidden_dim=4 * args.dim,
             multiple_of=args.multiple_of,
             ffn_dim_multiplier=args.ffn_dim_multiplier,
         )
+        # 层编号
         self.layer_id = layer_id
+        # 注意力层的标准化层
         self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
+        # 双线性层的标准化层
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
 
     def forward(
@@ -460,9 +469,11 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
+        # 注意力层+残差
         h = x + self.attention(
             self.attention_norm(x), start_pos, freqs_cis, mask
         )
+        # 双注意力层+残差
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
 
