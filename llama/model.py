@@ -101,11 +101,12 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     Returns:
         torch.Tensor: Precomputed frequency tensor with complex exponentials.
 
-    
-        
+
+
 
     """
-    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)
+                   [: (dim // 2)].float() / dim))
     t = torch.arange(end, device=freqs.device)  # type: ignore
     freqs = torch.outer(t, freqs).float()  # type: ignore
     freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
@@ -133,7 +134,8 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
     ndim = x.ndim
     assert 0 <= 1 < ndim
     assert freqs_cis.shape == (x.shape[1], x.shape[-1])
-    shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
+    shape = [d if i == 1 or i == ndim -
+             1 else 1 for i, d in enumerate(x.shape)]
     return freqs_cis.view(*shape)
 
 
@@ -158,7 +160,7 @@ def apply_rotary_emb(
     Returns:
         Tuple[torch.Tensor, torch.Tensor]: Tuple of modified query tensor and key tensor with rotary embeddings.
 
-        
+
 
     """
     xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
@@ -170,12 +172,15 @@ def apply_rotary_emb(
 
 
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
+    """torch.repeat_interleave(x, dim=2, repeats=n_rep)
+    针对KV的头数比Q少的情况，扩展KV的头数"""
+    # (N, L_cache+L, N_H_KV, D_H)
     bs, slen, n_kv_heads, head_dim = x.shape
     if n_rep == 1:
         return x
     return (
         x[:, :, :, None, :]
+        # 在N_H_KV维度复制多份即可
         .expand(bs, slen, n_kv_heads, n_rep, head_dim)
         .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
     )
@@ -184,6 +189,7 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
 class Attention(nn.Module):
     """Multi-head attention module.
     多头注意力模块"""
+
     def __init__(self, args: ModelArgs):
         """
         Initialize the Attention module.
@@ -206,16 +212,22 @@ class Attention(nn.Module):
 
         """
         super().__init__()
+        # KV的注意力头数
         self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
+        # 模型并行大小
         model_parallel_size = fs_init.get_model_parallel_world_size()
         self.n_local_heads = args.n_heads // model_parallel_size
         self.n_local_kv_heads = self.n_kv_heads // model_parallel_size
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
+        # 每个注意力头的维度
         self.head_dim = args.dim // args.n_heads
 
+        # QKV的线性变换
         self.wq = ColumnParallelLinear(
+            # 输入输出维度
             args.dim,
             args.n_heads * self.head_dim,
+            # 不需要偏置
             bias=False,
             gather_output=False,
             init_method=lambda x: x,
@@ -234,6 +246,7 @@ class Attention(nn.Module):
             gather_output=False,
             init_method=lambda x: x,
         )
+        # 输出的线性变换
         self.wo = RowParallelLinear(
             args.n_heads * self.head_dim,
             args.dim,
@@ -242,6 +255,8 @@ class Attention(nn.Module):
             init_method=lambda x: x,
         )
 
+        # 由于输入序列长度不一致，为加速训练，创建有长度为max_seq_len的大零矩阵
+        # 承接xk、xv，xk中不够长的地方留0
         self.cache_k = torch.zeros(
             (
                 args.max_batch_size,
@@ -279,36 +294,63 @@ class Attention(nn.Module):
             torch.Tensor: Output tensor after attention.
 
         """
+        # (N, L, D)
+        # 批大小、序列长度、向量维度
         bsz, seqlen, _ = x.shape
+        # 线性变换
+        # (N, L, N_H*D_H)
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
-
+        # 分头
+        # (N, L, N_H, D_H)
         xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
         xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
         xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-
+        # 位置嵌入
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
+        # 移动到指定设备
         self.cache_k = self.cache_k.to(xq)
         self.cache_v = self.cache_v.to(xq)
+        # 将xk、xv塞入cache_k、cache_v
+        self.cache_k[:bsz, start_pos: start_pos + seqlen] = xk
+        self.cache_v[:bsz, start_pos: start_pos + seqlen] = xv
 
-        self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
-        self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
-
+        # (N, L_cache+L, N_H, D_H)
         keys = self.cache_k[:bsz, : start_pos + seqlen]
         values = self.cache_v[:bsz, : start_pos + seqlen]
 
+        # 如果KV的头数比Q少，则扩展KV的头数
+        # (N, L_cache+L, N_H, D_H)
         # repeat k/v heads if n_kv_heads < n_heads
-        keys = repeat_kv(keys, self.n_rep)  # (bs, cache_len + seqlen, n_local_heads, head_dim)
-        values = repeat_kv(values, self.n_rep)  # (bs, cache_len + seqlen, n_local_heads, head_dim)
+        # (bs, cache_len + seqlen, n_local_heads, head_dim)
+        keys = repeat_kv(keys, self.n_rep)
+        # (bs, cache_len + seqlen, n_local_heads, head_dim)
+        values = repeat_kv(values, self.n_rep)
 
+        # (N, N_H, L, D_H)
         xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        keys = keys.transpose(1, 2) # (bs, n_local_heads, cache_len + seqlen, head_dim)
-        values = values.transpose(1, 2) # (bs, n_local_heads, cache_len + seqlen, head_dim)
-        scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
+        # (N, N_H, L+L_max, D_H)
+        # (bs, n_local_heads, cache_len + seqlen, head_dim)
+        keys = keys.transpose(1, 2)
+        # (bs, n_local_heads, cache_len + seqlen, head_dim)
+        values = values.transpose(1, 2)
+        # (N, N_H, L, L+L_max)
+        scores = torch.matmul(xq, keys.transpose(2, 3)) / \
+            math.sqrt(self.head_dim)
+
         if mask is not None:
-            scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
+            # 追加遮掩
+            # (bs, n_local_heads, seqlen, cache_len + seqlen)
+            scores = scores + mask
+
+        # 归一化
         scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-        output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
+        # 输出
+        # (N, N_H, L, D_H)
+        # (bs, n_local_heads, seqlen, head_dim)
+        output = torch.matmul(scores, values)
+        # 转置、去头
+        # (N, L, N_H, D_H)->(N, L, N_H*D_H)即(N, L, D)
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
         return self.wo(output)
 
@@ -341,7 +383,8 @@ class FeedForward(nn.Module):
         # custom dim factor multiplier
         if ffn_dim_multiplier is not None:
             hidden_dim = int(ffn_dim_multiplier * hidden_dim)
-        hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
+        hidden_dim = multiple_of * \
+            ((hidden_dim + multiple_of - 1) // multiple_of)
 
         # 并行线性层
         self.w1 = ColumnParallelLinear(
@@ -458,7 +501,7 @@ class Transformer(nn.Module):
         )
 
         self.freqs_cis = precompute_freqs_cis(
-            # Note that self.params.max_seq_len is multiplied by 2 because the token limit for the Llama 2 generation of models is 4096. 
+            # Note that self.params.max_seq_len is multiplied by 2 because the token limit for the Llama 2 generation of models is 4096.
             # Adding this multiplier instead of using 4096 directly allows for dynamism of token lengths while training or fine-tuning.
             self.params.dim // self.params.n_heads, self.params.max_seq_len * 2
         )
@@ -479,7 +522,7 @@ class Transformer(nn.Module):
         _bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
         self.freqs_cis = self.freqs_cis.to(h.device)
-        freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
+        freqs_cis = self.freqs_cis[start_pos: start_pos + seqlen]
 
         mask = None
         if seqlen > 1:
