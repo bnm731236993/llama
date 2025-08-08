@@ -498,19 +498,26 @@ class Transformer(nn.Module):
 
         """
         super().__init__()
+        # 参数类
         self.params = params
+        # 词典大小
         self.vocab_size = params.vocab_size
+        # Transformer层数
         self.n_layers = params.n_layers
 
+        # 嵌入层
         self.tok_embeddings = ParallelEmbedding(
             params.vocab_size, params.dim, init_method=lambda x: x
         )
 
+        # 模型序列
         self.layers = torch.nn.ModuleList()
+        # 创建多个Transformer块,用数字编号
         for layer_id in range(params.n_layers):
             self.layers.append(TransformerBlock(layer_id, params))
 
         self.norm = RMSNorm(params.dim, eps=params.norm_eps)
+        # 最后的线性映射层
         self.output = ColumnParallelLinear(
             params.dim, params.vocab_size, bias=False, init_method=lambda x: x
         )
@@ -534,30 +541,40 @@ class Transformer(nn.Module):
             torch.Tensor: Output logits after applying the Transformer model.
 
         """
+        # (N, L)
         _bsz, seqlen = tokens.shape
+        # (N, L, D)
         h = self.tok_embeddings(tokens)
+        # 设备移动
         self.freqs_cis = self.freqs_cis.to(h.device)
         freqs_cis = self.freqs_cis[start_pos: start_pos + seqlen]
 
+        # 创建遮掩
         mask = None
         if seqlen > 1:
+            # (L, L)
             mask = torch.full(
                 (seqlen, seqlen), float("-inf"), device=tokens.device
             )
-
+            # 右上三角矩阵,左下全是0
             mask = torch.triu(mask, diagonal=1)
 
             # When performing key-value caching, we compute the attention scores
             # only for the new sequence. Thus, the matrix of scores is of size
             # (seqlen, cache_len + seqlen), and the only masked entries are (i, j) for
             # j > cache_len + i, since row i corresponds to token cache_len + i.
+            # (L, L_cache+L)
             mask = torch.hstack([
+                # (L, L_cache)
                 torch.zeros((seqlen, start_pos), device=tokens.device),
                 mask
             ]).type_as(h)
 
+        # 通过各个Transformer层
         for layer in self.layers:
             h = layer(h, start_pos, freqs_cis, mask)
+        # 标准化
         h = self.norm(h)
+        # 最后的线性映射
         output = self.output(h).float()
         return output
