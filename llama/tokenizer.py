@@ -13,6 +13,7 @@ logger = getLogger()
 
 class Tokenizer:
     """tokenizing and encoding/decoding text using SentencePiece."""
+
     def __init__(self, model_path: str):
         """
         Initializes the Tokenizer with a SentencePiece model.
@@ -22,11 +23,14 @@ class Tokenizer:
         """
         # reload tokenizer
         assert os.path.isfile(model_path), model_path
+        # 分词模型
         self.sp_model = SentencePieceProcessor(model_file=model_path)
         logger.info(f"Reloaded SentencePiece model from {model_path}")
 
         # BOS / EOS token IDs
+        # 词典大小
         self.n_words: int = self.sp_model.vocab_size()
+        # 句首、句尾、空白的Token
         self.bos_id: int = self.sp_model.bos_id()
         self.eos_id: int = self.sp_model.eos_id()
         self.pad_id: int = self.sp_model.pad_id()
@@ -48,7 +52,9 @@ class Tokenizer:
             List[int]: A list of token IDs.
         """
         assert type(s) is str
+        # 字符串->IDs
         t = self.sp_model.encode(s)
+        # 添加BOS和EOS
         if bos:
             t = [self.bos_id] + t
         if eos:
@@ -65,4 +71,5 @@ class Tokenizer:
         Returns:
             str: The decoded string.
         """
+        # 不管BOS和EOS
         return self.sp_model.decode(t)
