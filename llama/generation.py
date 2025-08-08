@@ -183,6 +183,7 @@ class Llama:
         total_len = min(params.max_seq_len, max_gen_len + max_prompt_len)
 
         pad_id = self.tokenizer.pad_id
+        # 用tokens代替prompt_tokens的目的是统一各组序列长度
         # (N, L)，用PAD填充
         tokens = torch.full((bsz, total_len), pad_id,
                             dtype=torch.long, device="cuda")
@@ -216,6 +217,7 @@ class Llama:
                 ignore_index=pad_id,
             )
 
+        # 所有序列从统一的min_prompt_len位置开始生成
         for cur_pos in range(min_prompt_len, total_len):
             # 前向计算
             # 传入(N, P_pre:P_cur)，输出(N, P_pre:P_cur, V)
@@ -231,10 +233,11 @@ class Llama:
                 next_token = sample_top_p(probs, top_p)
             else:
                 next_token = torch.argmax(logits[:, -1], dim=-1)
-
             # (N)
             next_token = next_token.reshape(-1)
+
             # only replace token if prompt has already been generated
+            # 如果输出的词已存在（发生于输入序列比min_prompt_len短的情况），则避免替换
             next_token = torch.where(
                 input_text_mask[:, cur_pos], tokens[:, cur_pos], next_token
             )
@@ -249,10 +252,12 @@ class Llama:
                     reduction="none",
                     ignore_index=pad_id,
                 )
+
             eos_reached |= (~input_text_mask[:, cur_pos]) & (
                 next_token == self.tokenizer.eos_id
             )
             prev_pos = cur_pos
+            # 判断是否结束
             if all(eos_reached):
                 break
 
