@@ -131,11 +131,16 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
         AssertionError: If the frequency tensor doesn't match the expected shape.
         AssertionError: If the target tensor 'x' doesn't have the expected number of dimensions.
     """
+    # 维度数=5
     ndim = x.ndim
     assert 0 <= 1 < ndim
+    # (L, 2)
     assert freqs_cis.shape == (x.shape[1], x.shape[-1])
+    # 如果维度深度不为1或3，则为1
+    # (1, L, 1, 1, 2)
     shape = [d if i == 1 or i == ndim -
              1 else 1 for i, d in enumerate(x.shape)]
+    # (1, L, 1, 1, 2)
     return freqs_cis.view(*shape)
 
 
@@ -146,6 +151,7 @@ def apply_rotary_emb(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Apply rotary embeddings to input tensors using the given frequency tensor.
+    旋转嵌入
 
     This function applies rotary embeddings to the given query 'xq' and key 'xk' tensors using the provided
     frequency tensor 'freqs_cis'. The input tensors are reshaped as complex numbers, and the frequency tensor
@@ -153,19 +159,23 @@ def apply_rotary_emb(
     returned as real tensors.
 
     Args:
+        Q和K
         xq (torch.Tensor): Query tensor to apply rotary embeddings.
         xk (torch.Tensor): Key tensor to apply rotary embeddings.
+        频率
         freqs_cis (torch.Tensor): Precomputed frequency tensor for complex exponentials.
 
     Returns:
         Tuple[torch.Tensor, torch.Tensor]: Tuple of modified query tensor and key tensor with rotary embeddings.
-
-
-
     """
+
+    # 在深度维度拆成两份
+    # (N, L, N_H, D_H)->(N, L, N_H, D_H/2, 2)
     xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
     xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
+    # (1, L, 1, 1, 2)
     freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
+    # (N, L, N_H, D_H)
     xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
     xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
     return xq_out.type_as(xq), xk_out.type_as(xk)
