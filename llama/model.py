@@ -328,12 +328,12 @@ class Attention(nn.Module):
         self.cache_k[:bsz, start_pos: start_pos + seqlen] = xk
         self.cache_v[:bsz, start_pos: start_pos + seqlen] = xv
 
-        # (N, L_cache+L, N_H, D_H)
+        # (N, L_cache+L=L_all, N_H, D_H)
         keys = self.cache_k[:bsz, : start_pos + seqlen]
         values = self.cache_v[:bsz, : start_pos + seqlen]
 
         # 如果KV的头数比Q少，则扩展KV的头数
-        # (N, L_cache+L, N_H, D_H)
+        # (N, L_all, N_H, D_H)
         # repeat k/v heads if n_kv_heads < n_heads
         # (bs, cache_len + seqlen, n_local_heads, head_dim)
         keys = repeat_kv(keys, self.n_rep)
@@ -342,17 +342,18 @@ class Attention(nn.Module):
 
         # (N, N_H, L, D_H)
         xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        # (N, N_H, L+L_max, D_H)
+        # (N, N_H, L_all, D_H)
         # (bs, n_local_heads, cache_len + seqlen, head_dim)
         keys = keys.transpose(1, 2)
         # (bs, n_local_heads, cache_len + seqlen, head_dim)
         values = values.transpose(1, 2)
-        # (N, N_H, L, L+L_max)
+        # (N, N_H, L, L_all)
         scores = torch.matmul(xq, keys.transpose(2, 3)) / \
             math.sqrt(self.head_dim)
 
         if mask is not None:
             # 追加遮掩
+            # (N, N_H, L, L_all)
             # (bs, n_local_heads, seqlen, cache_len + seqlen)
             scores = scores + mask
 
@@ -570,7 +571,8 @@ class Transformer(nn.Module):
             mask = torch.full(
                 (seqlen, seqlen), float("-inf"), device=tokens.device
             )
-            # 右上三角矩阵,左下全是0
+            # 右上三角矩阵
+            # 左下、对角线全是0，右上全是负无穷
             mask = torch.triu(mask, diagonal=1)
 
             # When performing key-value caching, we compute the attention scores
