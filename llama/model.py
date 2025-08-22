@@ -226,8 +226,11 @@ class Attention(nn.Module):
         self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
         # 模型并行大小
         model_parallel_size = fs_init.get_model_parallel_world_size()
+        # Q的头数
         self.n_local_heads = args.n_heads // model_parallel_size
+        # KV的头数
         self.n_local_kv_heads = self.n_kv_heads // model_parallel_size
+        # Q和KV的头数比
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         # 每个注意力头的维度
         self.head_dim = args.dim // args.n_heads
@@ -360,8 +363,9 @@ class Attention(nn.Module):
         # (bs, n_local_heads, seqlen, head_dim)
         output = torch.matmul(scores, values)
         # 转置、去头
-        # (N, L, N_H, D_H)->(N, L, N_H*D_H)即(N, L, D)
+        # (N, L, N_H, D_H)->(N, L, N_H*D_H)
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
+        # (N, L, D)
         return self.wo(output)
 
 
